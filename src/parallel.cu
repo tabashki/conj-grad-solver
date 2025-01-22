@@ -8,7 +8,16 @@ using std::vector;
 
 __constant__ int d_vec_size;
 
-constexpr int BLOCK_SIZE = 128;
+constexpr int BLOCK_SIZE = 256;
+
+
+// CUDA kernel helper since there's no native float AtomicMax
+__device__ void atomicAbsMaxFloat(float* dest, float value)
+{
+    // This *should* be safe when the sign bit is always zero
+    atomicMax(reinterpret_cast<int*>(dest), __float_as_int(abs(value)));
+}
+
 
 // CUDA kernel that calculates a matrix-by-vector product
 // where A is the sparse matrix A of 3 diagonals (1, -2, 1)
@@ -84,9 +93,7 @@ __global__ void parallel_absmax(float* dest, const float* a_vec)
     // if we reduce into a block shared buffer first, before the global atomic max
     if (lane_idx == 0)
     {
-        // This *should* be ok since we can assume that the sign bit will always be zero
-        int a = __float_as_int(accum);
-        atomicMax(reinterpret_cast<int*>(dest), a);
+        atomicAbsMaxFloat(dest, accum);
     }
 }
 
@@ -110,6 +117,129 @@ __global__ void scalar_div(float* dest, float* neg_dest, const float* x, const f
     *neg_dest = -result;
 }
 
+__global__ void fused_matmul_dot(float *matmul_dest, float* dot_dest, const float* p_vec)
+{
+    const int global_i = blockDim.x * blockIdx.x + threadIdx.x;
+    const int lane_i = threadIdx.x & 0x1F;
+    const int i = threadIdx.x + 1;
+
+    __shared__ float p_cache[BLOCK_SIZE + 2];
+    __shared__ float dot_accum;
+
+    // Init cache for source data
+    p_cache[i] = (global_i < d_vec_size) ? p_vec[global_i] : 0;
+    // Init boundary values
+    if (threadIdx.x == 0)
+    {
+        dot_accum = 0;
+        p_cache[0] = (global_i < 1) ? 0 : p_vec[global_i-1];
+        p_cache[BLOCK_SIZE+1] = ((global_i+BLOCK_SIZE) < d_vec_size) ? p_vec[global_i+BLOCK_SIZE] : 0;
+    }
+
+    __syncthreads();
+    
+    float result = 0;
+    if (global_i < d_vec_size)
+    {
+        result += p_cache[i] * -2;
+        result += p_cache[i-1];
+        result += p_cache[i+1];
+        matmul_dest[global_i] = result;
+    }
+
+    // Fused wave-reduce dot product with p_vec
+    result *= p_cache[i];
+    result += __shfl_down_sync(WARP_MASK, result, 16);
+    result += __shfl_down_sync(WARP_MASK, result, 8);
+    result += __shfl_down_sync(WARP_MASK, result, 4);
+    result += __shfl_down_sync(WARP_MASK, result, 2);
+    result += __shfl_down_sync(WARP_MASK, result, 1);
+    
+    if (lane_i == 0)
+    {
+        atomicAdd(&dot_accum, result);
+    }
+    
+    __syncthreads();
+
+    if (threadIdx.x == 0)
+    {
+        atomicAdd(dot_dest, dot_accum);
+    }
+}
+
+__global__ void fused_vecmul_absmax_dot(float *dest_max, float* dest_dot, const float* rdotr, const float* pdotap,
+                                        float* x_vec, float* r_vec, const float* p_vec, const float* a_mul_p)
+{
+    const int i = blockDim.x * blockIdx.x + threadIdx.x;
+    const int lane_i = threadIdx.x & 0x1F;
+    const float alpha = *rdotr / *pdotap;
+
+    __shared__ float dot_accum;
+    __shared__ float max_accum;
+
+    if (threadIdx.x == 0)
+    {
+        dot_accum = 0;
+        max_accum = 0;
+    }
+
+    __syncthreads();
+
+    float r = 0;
+    if (i < d_vec_size)
+    {   
+        const float x = x_vec[i] + p_vec[i] * alpha; 
+        x_vec[i] = x;
+
+        r = r_vec[i] - a_mul_p[i] * alpha;
+        r_vec[i] = r;
+    }
+
+    float r_max = abs(r);
+    float r_dot = r * r;
+    
+    r_max = max(r_max, __shfl_down_sync(WARP_MASK, r_max, 16));
+    r_dot += __shfl_down_sync(WARP_MASK, r_dot, 16);
+
+    r_max = max(r_max, __shfl_down_sync(WARP_MASK, r_max, 8));
+    r_dot += __shfl_down_sync(WARP_MASK, r_dot, 8);
+
+    r_max = max(r_max, __shfl_down_sync(WARP_MASK, r_max, 4));
+    r_dot += __shfl_down_sync(WARP_MASK, r_dot, 4);
+
+    r_max = max(r_max, __shfl_down_sync(WARP_MASK, r_max, 2));
+    r_dot += __shfl_down_sync(WARP_MASK, r_dot, 2);
+
+    r_max = max(r_max, __shfl_down_sync(WARP_MASK, r_max, 1));
+    r_dot += __shfl_down_sync(WARP_MASK, r_dot, 1);
+
+    if (lane_i == 0)
+    {
+        atomicAdd(&dot_accum, r_dot);
+        atomicAbsMaxFloat(&max_accum, r_max);
+    }
+
+    __syncthreads();
+
+    if (threadIdx.x == 0)
+    {
+        atomicAdd(dest_dot, dot_accum);
+        atomicAbsMaxFloat(dest_max, max_accum);
+    }
+}
+
+__global__ void fused_beta_finalize(const float* rdotr, const float* new_rdotr, float *p_vec, const float* r_vec)
+{
+    const int i = blockDim.x * blockIdx.x + threadIdx.x;
+    const float beta = *new_rdotr / *rdotr;
+
+    if (i < d_vec_size)
+    {
+        p_vec[i] = r_vec[i] + p_vec[i] * beta;
+    }
+}
+
 cudaError_t verify(cudaError_t result)
 {
 #ifndef NDEBUG
@@ -123,7 +253,8 @@ cudaError_t verify(cudaError_t result)
     return result;   
 }
 
-#define LAUNCH_DOMAIN   div_round_up(size, BLOCK_SIZE), BLOCK_SIZE
+#define USE_FUSED_KERNELS 1
+#define LAUNCH_DOMAIN     div_round_up(size, BLOCK_SIZE), BLOCK_SIZE
 
 bool parallel_conj_grad(const vector<float>& in_b_vec, vector<float>& out_x_vec, const float threshold, const int max_iters)
 {
@@ -177,23 +308,30 @@ bool parallel_conj_grad(const vector<float>& in_b_vec, vector<float>& out_x_vec,
     verify(cudaMemcpy(d_r_vec, in_b_vec.data(), size * sizeof(float), cudaMemcpyHostToDevice));
     verify(cudaMemcpy(d_p_vec, d_r_vec, size * sizeof(float), cudaMemcpyDeviceToDevice));
 
-    // parallel_sp_matmul<<<LAUNCH_DOMAIN>>>(d_a_mul_p, d_x_vec);
-    // parallel_axby<<<LAUNCH_DOMAIN>>>(d_r_vec, d_b_vec, d_one, d_a_mul_p, d_neg_one);
     parallel_dot<<<LAUNCH_DOMAIN>>>(d_rdotr, d_r_vec, d_r_vec);
 
     for (int k = 0; k < max_iters; k++)
     {
-        parallel_sp_matmul<<<LAUNCH_DOMAIN>>>(d_a_mul_p, d_p_vec);
-
         verify(cudaMemset(d_p_dot_a_p, 0, sizeof(float)));
+        verify(cudaMemset(d_abs_max, 0, sizeof(float)));
+        verify(cudaMemset(d_new_rdotr, 0, sizeof(float)));
+
+#if USE_FUSED_KERNELS
+        fused_matmul_dot<<<LAUNCH_DOMAIN>>>(d_a_mul_p, d_p_dot_a_p, d_p_vec);
+        fused_vecmul_absmax_dot<<<LAUNCH_DOMAIN>>>(d_abs_max, d_new_rdotr, d_rdotr, d_p_dot_a_p, d_x_vec, d_r_vec, d_p_vec, d_a_mul_p);
+        fused_beta_finalize<<<LAUNCH_DOMAIN>>>(d_rdotr, d_new_rdotr, d_p_vec, d_r_vec);
+        verify(cudaMemcpyAsync(d_rdotr, d_new_rdotr, sizeof(float), cudaMemcpyDeviceToDevice));
+#else
+        parallel_sp_matmul<<<LAUNCH_DOMAIN>>>(d_a_mul_p, d_p_vec); 
+
         parallel_dot<<<LAUNCH_DOMAIN>>>(d_p_dot_a_p, d_p_vec, d_a_mul_p);
         scalar_div<<<1, 1>>>(d_alpha, d_neg_alpha, d_rdotr, d_p_dot_a_p);
 
         parallel_axby<<<LAUNCH_DOMAIN>>>(d_x_vec, d_x_vec, d_one, d_p_vec, d_alpha);
         parallel_axby<<<LAUNCH_DOMAIN>>>(d_r_vec, d_r_vec, d_one, d_a_mul_p, d_neg_alpha);
 
-        verify(cudaMemset(d_abs_max, 0, sizeof(float)));
         parallel_absmax<<<LAUNCH_DOMAIN>>>(d_abs_max, d_r_vec);
+#endif // USE_FUSED_KERNELS
 
         float abs_max = 0;
         verify(cudaMemcpy(&abs_max, d_abs_max, sizeof(abs_max), cudaMemcpyDeviceToHost));
@@ -205,20 +343,17 @@ bool parallel_conj_grad(const vector<float>& in_b_vec, vector<float>& out_x_vec,
             return true;
         }
 
-        verify(cudaMemset(d_new_rdotr, 0, sizeof(float)));
+#if !USE_FUSED_KERNELS
         parallel_dot<<<LAUNCH_DOMAIN>>>(d_new_rdotr, d_r_vec, d_r_vec);
 
         // NOTE: `d_neg_alpha` is used as a dummy destination here
         scalar_div<<<1, 1>>>(d_beta, d_neg_alpha, d_new_rdotr, d_rdotr);
-        verify(cudaMemcpy(d_rdotr, d_new_rdotr, sizeof(float), cudaMemcpyDeviceToDevice));
+        verify(cudaMemcpyAsync(d_rdotr, d_new_rdotr, sizeof(float), cudaMemcpyDeviceToDevice));
 
         parallel_axby<<<LAUNCH_DOMAIN>>>(d_p_vec, d_r_vec, d_one, d_p_vec, d_beta);
+#endif // USE_FUSED_KERNELS
     }
 
-    vector<float> result(in_b_vec.size(), 0.0f);
-    verify(cudaMemcpy(result.data(), d_result, size * sizeof(float), cudaMemcpyDeviceToHost));
-
-    // TODO:
     return false;
 }
 
