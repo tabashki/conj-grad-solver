@@ -632,7 +632,6 @@ bool parallel_conj_grad(const vector<float>& in_b_vec, vector<float>& out_x_vec,
     {
         for (int b = 0; b < BATCH_SIZE; b++)
         {
-
 #if USE_FUSED_KERNELS
             fused_update_scalars<<<1, SCALAR_COUNT>>>(d_scalars, d_rdotr_history);
             fused_beta_matmul_dot<<<LAUNCH_DOMAIN>>>(d_a_mul_p, d_scalars, d_rdotr_history, d_p_vec, d_r_vec);
@@ -658,10 +657,9 @@ bool parallel_conj_grad(const vector<float>& in_b_vec, vector<float>& out_x_vec,
             scalar_div<<<1, 1>>>(d_scalars+S_BETA, d_scalars+S_NEG_ALPHA, d_rdotr_history, d_rdotr_history+1);
 
             parallel_axby<<<LAUNCH_DOMAIN>>>(d_p_vec, d_r_vec, d_one, d_p_vec, d_scalars+S_BETA);
-        }
-        k += BATCH_SIZE;
 #endif // USE_FUSED_KERNELS
         }
+        k += BATCH_SIZE;
 #endif // USE_UBER_KERNEL
 
         float iters = 0;
