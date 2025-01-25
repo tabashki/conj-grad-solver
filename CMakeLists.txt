@@ -24,6 +24,7 @@ target_link_libraries(conjgrad cublas)
 
 # Add support for device kernel debugging
 target_compile_options(conjgrad PRIVATE $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:--device-debug>)
+target_compile_options(conjgrad PRIVATE $<$<AND:$<CONFIG:RelWithDebInfo>,$<COMPILE_LANGUAGE:CUDA>>:--generate-line-info>)
 
 # Optionally, set the GPU architecture for compilation
 set_target_properties(conjgrad PROPERTIES CUDA_ARCHITECTURES 60)
