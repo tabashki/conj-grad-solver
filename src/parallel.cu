@@ -20,7 +20,6 @@ enum ScalarIndex {
     S_ABS_MAX,
     SCALAR_COUNT,
 };
-static_assert(SCALAR_COUNT >= RDOTR_HISTORY_SIZE);
 
 
 __constant__ int d_vec_size;
