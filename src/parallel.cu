@@ -660,6 +660,7 @@ bool parallel_conj_grad(const vector<float>& in_b_vec, vector<float>& out_x_vec,
         }
         k += BATCH_SIZE;
 #endif // USE_FUSED_KERNELS
+        }
 #endif // USE_UBER_KERNEL
 
         float iters = 0;
