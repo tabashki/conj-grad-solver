@@ -557,7 +557,8 @@ bool parallel_conj_grad(const vector<float>& in_b_vec, vector<float>& out_x_vec,
     max_block_occupancy *= device_props.multiProcessorCount;
     
     const int blocks = div_round_up(size, BLOCK_SIZE);
-    std::cout << "Device " << device_id << " supports max: " << max_block_occupancy << " blocks launched" << std::endl;
+    std::cout << "Device " << device_id << " supports max: " << max_block_occupancy
+		<< " blocks (" << max_block_occupancy * BLOCK_SIZE << " threads) launched" << std::endl;
     if (max_block_occupancy < blocks)
     {
         std::cout << "Device " << device_id << " doesn't support required number of blocks: " << blocks << std::endl;
