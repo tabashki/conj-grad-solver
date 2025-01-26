@@ -535,12 +535,21 @@ bool parallel_conj_grad(const vector<float>& in_b_vec, vector<float>& out_x_vec,
     {
         return false;
     }
+
+    constexpr int device_id = 0;
+    const int64_t init_start = timestamp_ns();
+    if (verify(cudaInitDevice(device_id, 0, 0)) != cudaSuccess)
+    {
+        std::cout << "Failed to init CUDA device " << device_id << std::endl;
+        return false;
+    } 
+    std::cout << "CUDA init took " << (timestamp_ns() - init_start) * 1e-6 << " ms" << std::endl;
+
     int size = static_cast<int>(in_b_vec.size());
     verify(cudaMemcpyToSymbol(d_vec_size, &size, sizeof(d_vec_size)));
     verify(cudaMemcpyToSymbol(d_max_iterations, &max_iters, sizeof(d_max_iterations)));
     verify(cudaMemcpyToSymbol(d_threshold, &threshold, sizeof(d_threshold)));
 
-    constexpr int device_id = 0;
     int supports_coop_launch = 0;
     cudaDeviceGetAttribute(&supports_coop_launch, cudaDevAttrCooperativeLaunch, device_id);
     std::cout << "Device " << device_id << " Supports Cooperative Launch: " << (supports_coop_launch ? "Yes" : "No") << std::endl;
