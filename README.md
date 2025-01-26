@@ -39,4 +39,4 @@ The `test/` directory contains three test inputs for the `b` vector that can be 
 
 The program contains both a simple, serial CPU-only implementation that is selected using the `-s` argument, as well as the parallelized CUDA implementation, selected using the `-p` argument.
 
-All test data and expected results have been generated using `numpy`.
+All test data and expected results have been generated using the python script `test/gen-test-files.py`.
