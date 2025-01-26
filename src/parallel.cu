@@ -538,7 +538,9 @@ bool parallel_conj_grad(const vector<float>& in_b_vec, vector<float>& out_x_vec,
 
     constexpr int device_id = 0;
     const int64_t init_start = timestamp_ns();
-    if (verify(cudaInitDevice(device_id, 0, 0)) != cudaSuccess)
+
+    // Force an explicit initialization of the context
+    if (verify(cudaSetDevice(device_id)) != cudaSuccess)
     {
         std::cout << "Failed to init CUDA device " << device_id << std::endl;
         return false;
